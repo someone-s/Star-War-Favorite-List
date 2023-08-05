@@ -9,8 +9,9 @@ namespace Star_War_List
 {
     public static class Program
     {
-        private static readonly HttpClient client = new HttpClient();
+        private static HttpClient client = new HttpClient();
         private static string swapi = "https://swapi.dev/api";
+        private static Random random = new Random();
 
         private static string selfPlanetsPath = "/planets";
         private static string selfFavoritesPath = "/favorites";
@@ -24,6 +25,7 @@ namespace Star_War_List
 
             var planets = app.MapGroup(selfPlanetsPath);
             planets.MapGet("/", GetPlanets);
+            planets.MapGet("/random", GetRandomPlanet);
 
             var favorites = planets.MapGroup(selfFavoritesPath);
             favorites.MapGet("/", GetFavoritePlanets);
@@ -37,6 +39,7 @@ namespace Star_War_List
         private static string targetPlanetPath = $"/planets";
         private static string targetPlanetEndpoint = $"{swapi}{targetPlanetPath}";
         private static string targetArrayFieldName = "results";
+        private static string targetCountFieldName = "count";
         private static string targetNextFieldName = "next";
 
         private static async Task<IResult> GetPlanets()
@@ -48,25 +51,25 @@ namespace Star_War_List
             {
                 var response = await client.GetAsync(target);
                 if (!response.IsSuccessStatusCode)
-                    break;
+                    return TypedResults.StatusCode(StatusCodes.Status502BadGateway);
 
                 var jsonDocument = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
                 if (!jsonDocument.RootElement.TryGetProperty(targetArrayFieldName, out JsonElement jsonPlanetsElement))
-                    break;
+                    return TypedResults.StatusCode(StatusCodes.Status502BadGateway);
 
                 if (jsonPlanetsElement.ValueKind != JsonValueKind.Array)
-                    break;
+                    return TypedResults.StatusCode(StatusCodes.Status502BadGateway);
                 var jsonArray = JsonArray.Create(jsonPlanetsElement);
 
                 if (jsonArray is null)
-                    break;
+                    return TypedResults.StatusCode(StatusCodes.Status502BadGateway);
                 list = list.Concat(jsonArray).ToList();
                 jsonArray.Clear();
 
                 if (!jsonDocument.RootElement.TryGetProperty(targetNextFieldName, out JsonElement jsonNextElement))
-                    break;
+                    return TypedResults.StatusCode(StatusCodes.Status502BadGateway);
 
-                if (jsonNextElement.ValueKind != JsonValueKind.String)
+                if (jsonNextElement.ValueKind != JsonValueKind.String) // i.e. null
                     break;
                 target = jsonNextElement.GetString();
             }
@@ -75,9 +78,11 @@ namespace Star_War_List
             var planets = new JsonArray(list.ToArray());
             return TypedResults.Ok(planets);
         }
-        private static async Task<JsonNode?> GetPlanetDetails(FavoritePlanet planet)
+        private static async Task<JsonNode?> GetPlanetDetails(FavoritePlanet planet) => 
+            await GetPlanetDetails(planet.Id);
+        private static async Task<JsonNode?> GetPlanetDetails(int id)
         {
-            var target = $"{targetPlanetEndpoint}/{planet.Id}";
+            var target = $"{targetPlanetEndpoint}/{id}";
             var response = await client.GetAsync(target);
             if (!response.IsSuccessStatusCode)
                 return null;
@@ -87,6 +92,40 @@ namespace Star_War_List
                 return null;
 
             return JsonObject.Create(jsonDocument.RootElement);
+        }
+
+        private static async Task<IResult> GetRandomPlanet(FavoritePlanetDb db)
+        {
+            var response = await client.GetAsync(targetPlanetEndpoint);
+            if (!response.IsSuccessStatusCode)
+                return TypedResults.StatusCode(StatusCodes.Status502BadGateway);
+
+            var jsonDocument = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
+            if (!jsonDocument.RootElement.TryGetProperty(targetCountFieldName, out JsonElement jsonCountElement))
+                return TypedResults.StatusCode(StatusCodes.Status502BadGateway);
+
+            if (jsonCountElement.ValueKind != JsonValueKind.Number)
+                return TypedResults.StatusCode(StatusCodes.Status502BadGateway);
+
+            if (!jsonCountElement.TryGetInt32(out int availableCount))
+                return TypedResults.StatusCode(StatusCodes.Status502BadGateway);
+
+            var favoriteCount = await db.FavoritePlanets.CountAsync();
+            if (favoriteCount >= availableCount)
+                return TypedResults.NoContent(); // all planets favorited
+
+            var linearIndex = random.Next(availableCount - favoriteCount) + 1;
+
+            var favoriteIndices = await db.FavoritePlanets.Select(planet => planet.Id).ToArrayAsync();
+            foreach (var favoriteIndex in favoriteIndices.Order())
+                if (linearIndex <= favoriteIndex)
+                    linearIndex += 1;
+
+            if (await GetPlanetDetails(linearIndex) is JsonNode details)
+                return TypedResults.Ok(details);
+            else
+                return TypedResults.StatusCode(StatusCodes.Status502BadGateway);
+
         }
 
         private static async Task<IResult> GetFavoritePlanets(FavoritePlanetDb db)
@@ -105,7 +144,7 @@ namespace Star_War_List
         {
             var response = await client.GetAsync($"{targetPlanetEndpoint}/{id}");
             if (!response.IsSuccessStatusCode)
-                return TypedResults.BadRequest($"{id} provided not found on {targetPlanetEndpoint}, or {targetPlanetEndpoint} is down");
+                return TypedResults.StatusCode(StatusCodes.Status502BadGateway);
 
             db.FavoritePlanets.Add(new FavoritePlanet { Id = id });
             await db.SaveChangesAsync();
